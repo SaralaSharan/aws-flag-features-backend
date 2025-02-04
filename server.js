@@ -8,17 +8,38 @@ const { body, validationResult } = require("express-validator");
 const winston = require("winston");
 require("winston-cloudwatch");
 
-// Initialize Firebase Admin SDK
-const serviceAccount = require("./serviceAccountKey.json");
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+const secretsManager = new AWS.SecretsManager();
+
+// Initialize Firebase Admin SDK using AWS Secrets Manager
+async function initializeFirebase() {
+  try {
+    const secretData = await secretsManager
+      .getSecretValue({ SecretId: "FirebaseServiceKey" })
+      .promise();
+    const serviceAccount = JSON.parse(secretData.SecretString);
+
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+    console.log(
+      "✅ Firebase initialized successfully with AWS Secrets Manager"
+    );
+  } catch (error) {
+    console.error("❌ Error initializing Firebase:", error);
+    process.exit(1);
+  }
+}
+initializeFirebase();
 
 const app = express();
 app.use(express.json());
 
+// Ensure AWS Region is Set
+const awsRegion = process.env.AWS_REGION || "us-east-1";
 // AWS Configuration
-AWS.config.update({ region: process.env.AWS_REGION });
+AWS.config.update({ region: awsRegion });
+
+const cloudwatch = new AWS.CloudWatch();
 
 // Initialize CloudWatch Logger with Retention Policy
 const cloudwatchConfig = {
@@ -51,6 +72,29 @@ cloudwatchLogs.putRetentionPolicy(
   }
 );
 
+// Function to send CloudWatch metrics
+const sendMetric = (metricName, value) => {
+  const params = {
+    Namespace: "FeatureFlagAPI",
+    MetricData: [
+      {
+        MetricName: metricName,
+        Value: value,
+        Unit: "Count",
+        Timestamp: new Date(),
+      },
+    ],
+  };
+
+  cloudwatch.putMetricData(params, (err, data) => {
+    if (err) {
+      console.error(`Error sending CloudWatch metric ${metricName}:`, err);
+    } else {
+      console.log(`Metric ${metricName} sent to CloudWatch.`);
+    }
+  });
+};
+
 // AWS DynamoDB Config
 const dynamodb = new AWS.DynamoDB();
 const documentClient = new AWS.DynamoDB.DocumentClient();
@@ -67,6 +111,7 @@ async function verifyToken(req, res, next) {
     next();
   } catch (error) {
     logger.warn("Invalid or expired token", { error });
+    sendMetric("UnauthorizedRequests", 1);
     return res.status(403).json({ error: "Invalid or expired token" });
   }
 }
@@ -85,6 +130,7 @@ app.post(
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       logger.warn("Invalid sign-up attempt", { errors: errors.array() });
+      sendMetric("FailedSignUpAttempts", 1);
       return res.status(400).json({ errors: errors.array() });
     }
 
@@ -112,44 +158,54 @@ app.post(
         .promise();
 
       logger.info("User signed up successfully", { userId, email });
+      sendMetric("SuccessfulSignUp", 1);
       res
         .status(201)
         .json({ message: "User created successfully!", uid: userRecord.uid });
     } catch (error) {
       logger.error("Error creating user", { error });
+      sendMetric("SignUpErrors", 1);
       res.status(500).json({ error: error.message });
     }
   }
 );
 
-// User Login
-app.post(
-  "/login",
-  [
-    body("email").isEmail().withMessage("Invalid email"),
-    body("password").notEmpty().withMessage("Password is required"),
-  ],
-  async (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      logger.warn("Invalid login attempt", { errors: errors.array() });
-      return res.status(400).json({ errors: errors.array() });
+// Retrieve User by Email or UserId
+app.get("/users/:identifier", async (req, res) => {
+  const { identifier } = req.params;
+
+  const paramsByEmail = {
+    TableName: USERS_TABLE,
+    Key: { email: identifier },
+  };
+
+  const paramsById = {
+    TableName: USERS_TABLE,
+    IndexName: "userId-index",
+    KeyConditionExpression: "userId = :userId",
+    ExpressionAttributeValues: { ":userId": identifier },
+  };
+
+  try {
+    let data = await documentClient.get(paramsByEmail).promise();
+    if (!data.Item) {
+      data = await documentClient.query(paramsById).promise();
+      if (data.Items.length > 0) {
+        data.Item = data.Items[0];
+      }
     }
 
-    const { email } = req.body;
-
-    try {
-      const user = await admin.auth().getUserByEmail(email);
-      const customToken = await admin.auth().createCustomToken(user.uid);
-
-      logger.info("User logged in successfully", { email });
-      res.json({ message: "Login successful!", token: customToken });
-    } catch (error) {
-      logger.error("Login error", { error });
-      res.status(400).json({ error: "Invalid email or password." });
+    if (data.Item) {
+      const { userId, email, displayName, createdAt } = data.Item;
+      res.status(200).json({ userId, email, displayName, createdAt });
+    } else {
+      res.status(404).json({ error: "User not found" });
     }
+  } catch (error) {
+    logger.error("Error retrieving user", { error });
+    res.status(500).json({ error: error.message });
   }
-);
+});
 
 // Protected Feature Flags Route
 app.get("/feature-flags", verifyToken, async (req, res) => {
@@ -158,9 +214,11 @@ app.get("/feature-flags", verifyToken, async (req, res) => {
       .scan({ TableName: "FeatureFlags" })
       .promise();
     logger.info("Feature flags retrieved");
+    sendMetric("FeatureFlagsRetrieved", result.Items.length);
     res.json(result.Items);
   } catch (err) {
     logger.error("Error retrieving feature flags", { error: err.message });
+    sendMetric("FeatureFlagsErrors", 1);
     res.status(500).json({ error: err.message });
   }
 });
@@ -168,7 +226,10 @@ app.get("/feature-flags", verifyToken, async (req, res) => {
 // Root Route
 app.get("/", (req, res) => {
   logger.info("API Health Check Requested");
-  res.json({ message: "Feature Flag API with CloudWatch Logging is running!" });
+  sendMetric("HealthCheckRequests", 1);
+  res.json({
+    message: "Feature Flag API with CloudWatch Logging and Metrics is running!",
+  });
 });
 
 // Start Express Server

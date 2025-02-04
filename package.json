@@ -4,7 +4,10 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "nodemon server.js"
+    "start": "nodemon server.js",
+    "deploy": "bash ./aws_infra/scripts/deploy_infra.sh",
+    "destroy": "bash ./aws_infra/scripts/destroy_infra.sh",
+    "check": "bash ./aws_infra/scripts/check_stack.sh"
   },
   "keywords": [],
   "author": "",
@@ -20,6 +23,7 @@
     "express-validator": "^7.2.1",
     "firebase-admin": "^13.0.2",
     "helmet": "^8.0.0",
+    "js-yaml": "^4.1.0",
     "jsonwebtoken": "^9.0.2",
     "uuid": "^11.0.5",
     "winston": "^3.17.0",
