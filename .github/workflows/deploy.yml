@@ -26,11 +26,12 @@ jobs:
 
       - name: Build and Push Docker Image
         env:
-          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
           ECR_REPOSITORY: feature-flag-api
           IMAGE_TAG: latest
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          echo "Using ECR_REGISTRY=$ECR_REGISTRY"
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .  # ✅ Added the '.' context
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
       - name: Update CloudFormation Stack
