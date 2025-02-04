@@ -24,14 +24,21 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
 
+      - name: Retrieve ECR Registry URI
+        run: |
+          echo "Retrieving ECR Registry..."
+          ECR_REGISTRY=$(aws ecr describe-repositories --query 'repositories[?repositoryName==`feature-flag-api`].repositoryUri' --output text)
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
+
       - name: Build and Push Docker Image
         env:
+          AWS_REGION: us-east-1
           ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
           ECR_REPOSITORY: feature-flag-api
           IMAGE_TAG: latest
         run: |
           echo "Using ECR_REGISTRY=$ECR_REGISTRY"
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .  # ✅ Added the '.' context
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
       - name: Update CloudFormation Stack
